@@ -483,72 +483,123 @@ function extractPriceData(aiResponse: string) {
 
 // Function to extract yield data from crop recommendations AI response
 function extractYieldData(aiResponse: string) {
-  // Try to match the Yield Analysis section (with or without ** markdown bold)
-  let yieldAnalysisMatch = aiResponse.match(/\**\s*Yield Analysis\s*\**([\s\S]*?)(?=\n\n|$)/)
+  // Normalize line endings to \n
+  const normalizedResponse = aiResponse.replace(/\r\n/g, '\n')
   
-  // If not found, try to extract from individual crop sections
-  if (!yieldAnalysisMatch) {
-    // Look for yield probability in each crop section (with or without ** markdown bold)
-    const cropSections = aiResponse.match(/\**\s*🌾\s*Crop\s*\d+:\s*([^*]+)\**[\s\S]*?Yield Probability:\s*(\d+)%/g)
+  // ===== STRATEGY 1: Parse the "Yield Analysis" summary section =====
+  // Match various header formats: **Yield Analysis**, ## Yield Analysis, ### Yield Analysis, etc.
+  const yieldSectionMatch = normalizedResponse.match(
+    /(?:\*{1,2}\s*|#{1,3}\s*)Yield Analysis\s*\*{0,2}\s*\n([\s\S]*?)(?=\n\n|\n(?:\*{2}\s*|#{1,3}\s*)[A-Z]|$)/i
+  )
+  
+  if (yieldSectionMatch) {
+    const yieldSection = yieldSectionMatch[1]
+    // Match any bullet style: •, -, *, numbered (1.), or ✅ — with optional bold crop names
+    const bulletRegex = /(?:^|\n)\s*(?:•|[-*]|\d+[.)]\s*)\s*(?:✅\s*)?\*{0,2}([^:\n]+?)\*{0,2}\s*:\s*(\d+)%\s*\(([^)]+)\)/g
+    const crops: Array<{ name: string; probability: number; status: string }> = []
+    let match
     
-    if (cropSections && cropSections.length > 0) {
-      const crops = cropSections.map(section => {
-        const cropMatch = section.match(/\**\s*🌾\s*Crop\s*\d+:\s*([^*]+)\**[\s\S]*?Yield Probability:\s*(\d+)%/)
-        if (cropMatch) {
-          const cropName = cropMatch[1].trim()
-          const probability = parseInt(cropMatch[2])
-          
-          // Determine status based on probability
-          let status = "Moderate Match"
-          if (probability >= 80) {
-            status = "Best Match"
-          } else if (probability >= 70) {
-            status = "Good Match"
-          }
-          
-          return {
-            name: cropName,
-            probability: probability,
-            status: status
-          }
-        }
-        return null
-      }).filter((crop): crop is { name: string; probability: number; status: string } => crop !== null)
-      
-      // Sort by probability (highest first)
+    while ((match = bulletRegex.exec(yieldSection)) !== null) {
+      crops.push({
+        name: match[1].trim(),
+        probability: parseInt(match[2]),
+        status: match[3].trim()
+      })
+    }
+    
+    if (crops.length > 0) {
       crops.sort((a, b) => b.probability - a.probability)
-      
       return crops
     }
+  }
+  
+  // ===== STRATEGY 2: Parse individual crop sections with "Yield Probability:" lines =====
+  // Match any emoji before "Crop N:" — not just 🌾
+  const cropSectionRegex = /\*{0,2}\s*(?:[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\s*)?Crop\s*\d+:\s*([^*\n]+?)\s*\*{0,2}\s*\n[\s\S]*?Yield Probability:\s*(\d+)%(?:\s*\(([^)]+)\))?/gu
+  const crops2: Array<{ name: string; probability: number; status: string }> = []
+  let sectionMatch
+  
+  while ((sectionMatch = cropSectionRegex.exec(normalizedResponse)) !== null) {
+    const cropName = sectionMatch[1].trim()
+    const probability = parseInt(sectionMatch[2])
+    let status = sectionMatch[3]?.trim() || ""
     
-    return null
-  }
-  
-  // Process the Yield Analysis section
-  const yieldSection = yieldAnalysisMatch[1]
-  // Match both with and without ✅ emoji, and also • (bullet) only
-  const cropMatches = yieldSection.match(/•\s*(?:✅\s*)?([^:]+):\s*(\d+)%\s*\(([^)]+)\)/g)
-  
-  if (!cropMatches || cropMatches.length === 0) {
-    return null
-  }
-  
-  const crops = cropMatches.map(match => {
-    const cropMatch = match.match(/•\s*(?:✅\s*)?([^:]+):\s*(\d+)%\s*\(([^)]+)\)/)
-    if (cropMatch) {
-      return {
-        name: cropMatch[1].trim(),
-        probability: parseInt(cropMatch[2]),
-        status: cropMatch[3].trim()
+    // Determine status from probability if not provided
+    if (!status) {
+      if (probability >= 80) {
+        status = "Best Match"
+      } else if (probability >= 70) {
+        status = "Good Match"
+      } else {
+        status = "Moderate Match"
       }
     }
-    return null
-  }).filter((crop): crop is { name: string; probability: number; status: string } => crop !== null)
+    
+    crops2.push({ name: cropName, probability, status })
+  }
   
-  // Sort by probability (highest first)
-  crops.sort((a, b) => b.probability - a.probability)
+  if (crops2.length > 0) {
+    crops2.sort((a, b) => b.probability - a.probability)
+    return crops2
+  }
   
-  return crops
+  // ===== STRATEGY 3: Fallback — find ANY "CropName: XX% (Status)" pattern in the response =====
+  const genericRegex = /(?:•|[-*]|\d+[.)]\s*)\s*(?:✅\s*)?\*{0,2}([A-Za-z\s]+?)\*{0,2}\s*:\s*(\d+)%\s*\(([^)]+)\)/g
+  const fallbackCrops: Array<{ name: string; probability: number; status: string }> = []
+  let fallbackMatch
+  
+  while ((fallbackMatch = genericRegex.exec(normalizedResponse)) !== null) {
+    const name = fallbackMatch[1].trim()
+    // Skip generic labels like "Yield Probability" or section headers
+    if (name.toLowerCase().includes('yield') || name.toLowerCase().includes('probability') || name.length > 30) {
+      continue
+    }
+    fallbackCrops.push({
+      name,
+      probability: parseInt(fallbackMatch[2]),
+      status: fallbackMatch[3].trim()
+    })
+  }
+  
+  if (fallbackCrops.length > 0) {
+    // Deduplicate by crop name (keep first occurrence)
+    const seen = new Set<string>()
+    const uniqueCrops = fallbackCrops.filter(crop => {
+      const key = crop.name.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    uniqueCrops.sort((a, b) => b.probability - a.probability)
+    return uniqueCrops
+  }
+  
+  // ===== STRATEGY 4: Last resort — find "Yield Probability: XX%" anywhere and pair with crop headers =====
+  const yieldProbMatches = [...normalizedResponse.matchAll(/Yield Probability:\s*(\d+)%/g)]
+  const cropHeaderMatches = [...normalizedResponse.matchAll(/(?:[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]\s*)?Crop\s*\d+:\s*([^*\n]+)/gu)]
+  
+  if (yieldProbMatches.length > 0 && cropHeaderMatches.length > 0) {
+    const lastResortCrops: Array<{ name: string; probability: number; status: string }> = []
+    const count = Math.min(yieldProbMatches.length, cropHeaderMatches.length)
+    
+    for (let i = 0; i < count; i++) {
+      const probability = parseInt(yieldProbMatches[i][1])
+      let status = "Moderate Match"
+      if (probability >= 80) status = "Best Match"
+      else if (probability >= 70) status = "Good Match"
+      
+      lastResortCrops.push({
+        name: cropHeaderMatches[i][1].trim(),
+        probability,
+        status
+      })
+    }
+    
+    lastResortCrops.sort((a, b) => b.probability - a.probability)
+    return lastResortCrops
+  }
+  
+  return null
 }
 
 function AuthProtectedDashboard({ user, userProfile }: { user: any; userProfile: any }) {
